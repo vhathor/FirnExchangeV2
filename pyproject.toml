@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "FirnExchange"
+version = "0.1.0"
+description = "FirnExchange"
+requires-python = ">=3.11, <3.12"
+authors = [
+  { name = "Vishal Verma", email = "vishal.verma@snowflake.com" },
+]
+dependencies = [
+    "streamlit",
+    "snowflake-snowpark-python",
+    "pandas"
+]
