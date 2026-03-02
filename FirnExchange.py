@@ -17,6 +17,21 @@ cd /Users/vverma/sprojects/snowflake/apps/FirnExchange_V2
 conda activate firnexchange
 streamlit run FirnExchange.py
 
+FIRN_LOCAL_TEST=true SNOWFLAKE_CONNECTION_NAME=sf-usb97494-vverma-kp_une streamlit run FirnExchange.py
+
+# SNOWFLAKE_CONNECTION_NAME=sf-usb97494-vverma-kp_une streamlit run /Users/vverma/sprojects/snowflake/apps/Notebook_analyzer/app.py --server.port 8502
+
+All 3 test using sql files are successful.
+test_copy_into_add_files_copy.sql
+test_copy_into_add_files_reference.sql
+test_copy_into_full_ingest.sql
+
+
+However when I am testing through streamlit app, 
+add_files_reference and full_ingest are working fine 
+but add_files_copy does not showing rows in iceberg table after process completes.
+
+Test load add_files_copy import in streamlit app and confirm if if you data in final iceberg table.
 
 """
 
@@ -845,29 +860,22 @@ tab1, tab2 = st.tabs(["📋 Configure & Launch", "📊 Monitor Tasks"])
 if not validate_sis_environment():
     st.error("⚠️ **Invalid Environment**")
     st.markdown("""
-    ### This Application Runs ONLY in Snowflake
+    ### Environment Not Detected
     
-    **FirnExchange** is designed exclusively for **Streamlit in Snowflake (SiS)** environment.
+    **FirnExchange** is designed for **Streamlit in Snowflake (SiS)** or **Local Testing** mode.
     
-    **To run this application:**
-    1. Deploy it to your Snowflake account using the provided deployment script
-    2. Access it through Snowflake's Streamlit interface
-    3. Navigate to: **Data Products > Streamlit > FirnExchange**
+    **Option 1: Run in Snowflake (Production)**
+    1. Deploy using the `firnexchange_sis.sql` deployment script
+    2. Access via: **Data Products > Streamlit > FirnExchange**
     
-    **Deployment Instructions:**
-    - Review the `firnexchange_sis.sql` deployment script
-    - Execute the script in your Snowflake account
-    - The application will be available in your Snowflake account
+    **Option 2: Run Locally (Testing)**
+    ```bash
+    FIRN_LOCAL_TEST=true SNOWFLAKE_CONNECTION_NAME=sf-usb97494-vverma-kp_une streamlit run FirnExchange.py
+    ```
     
-    **Why SiS Only?**
-    - ✅ Enhanced security with native Snowflake authentication
-    - ✅ No external dependencies or configuration files
-    - ✅ Seamless integration with Snowflake resources
-    - ✅ Centralized deployment and access control
-    - ✅ Better performance with native Snowflake connectivity
-    
-    ---
-    **Note:** This application does not support local execution and has no dependency on `config.toml` files.
+    **Required Environment Variables for Local Testing:**
+    - `FIRN_LOCAL_TEST=true` - Enables local testing mode
+    - `SNOWFLAKE_CONNECTION_NAME` - Connection name from ~/.snowflake/connections.toml
     """)
     st.stop()
 
@@ -883,7 +891,7 @@ with st.sidebar:
             st.session_state.session = session
             st.session_state.connected = True
             st.session_state.auto_connected = True
-            st.session_state.running_environment = "Streamlit in Snowflake"
+            # running_environment is already set by get_snowpark_session()
             
             # Get connection info from active session
             try:
@@ -924,7 +932,11 @@ with st.sidebar:
             st.stop()
     
     # Show environment indicator
-    st.info("🏔️ **Running in Snowflake**")
+    env = st.session_state.get('running_environment', 'Unknown')
+    if 'Local' in env:
+        st.warning(f"💻 **{env}**")
+    else:
+        st.info(f"🏔️ **{env}**")
     
     # Show connection details
     if st.session_state.connected:
@@ -950,15 +962,25 @@ with st.sidebar:
     # Environment info
     if st.session_state.connected:
         st.divider()
+        env = st.session_state.get('running_environment', 'Unknown')
         with st.expander("ℹ️ Environment Info", expanded=False):
-            st.markdown("""
-            **Streamlit in Snowflake**
-            - ✅ Native Snowflake authentication
-            - ✅ Secure execution context
-            - ✅ No external configuration required
-            - ✅ Centralized access control
-            - ✅ All features supported
-            """)
+            if 'Local' in env:
+                st.markdown("""
+                **Local Testing Mode**
+                - 💻 Running on local machine
+                - 🔗 Using connection from connections.toml
+                - ⚠️ For testing/development only
+                - ✅ All features supported
+                """)
+            else:
+                st.markdown("""
+                **Streamlit in Snowflake**
+                - ✅ Native Snowflake authentication
+                - ✅ Secure execution context
+                - ✅ No external configuration required
+                - ✅ Centralized access control
+                - ✅ All features supported
+                """)
 
 # Tab 1: FirnExchange - Combined Export and Import
 with tab1:
@@ -2126,17 +2148,29 @@ with tab1:
             with col1:
                 exchange_load_mode = st.selectbox(
                     "LOAD_MODE",
-                    ["ADD_FILES_COPY", "ADD_FILES", "FULL_INGEST"],
+                    ["ADD_FILES_COPY", "ADD_FILES_REFERENCE", "FULL_INGEST"],
                     index=0,
-                    help="ADD_FILES_COPY: Copy files to table location (recommended). ADD_FILES: Reference files in place. FULL_INGEST: Traditional COPY with parsing.",
+                    help="""
+**ADD_FILES_COPY**: Copy parquet files from external stage to Iceberg table's base location, then register in metadata. Best for files in a different location.
+
+**ADD_FILES_REFERENCE**: Register existing parquet files already in Iceberg table's base location without copying (Private Preview). Fastest option when files are already in table location.
+
+**FULL_INGEST**: Traditional COPY with full data parsing and transformation. Use when data transformation is needed.
+                    """,
                     key="exchange_load_mode_select"
                 )
             
             with col2:
-                st.info("**Fixed Parameters:**\n\n"
-                       "• FILE_FORMAT: PARQUET (USE_VECTORIZED_SCANNER = TRUE)\n\n"
-                       "• MATCH_BY_COLUMN_NAME: CASE_SENSITIVE\n\n"
-                       "• ON_ERROR: ABORT_STATEMENT")
+                if exchange_load_mode == "ADD_FILES_REFERENCE":
+                    st.warning("**ADD_FILES_REFERENCE Requirements:**\n\n"
+                              "• Files must be in Iceberg table's BASE_LOCATION\n\n"
+                              "• Parquet columns must match table schema exactly\n\n"
+                              "• INTEGER exports as NUMBER(38,0) - ensure table uses NUMBER(38,0)")
+                else:
+                    st.info("**Fixed Parameters:**\n\n"
+                           "• FILE_FORMAT: PARQUET (USE_VECTORIZED_SCANNER = TRUE)\n\n"
+                           "• MATCH_BY_COLUMN_NAME: CASE_SENSITIVE\n\n"
+                           "• ON_ERROR: ABORT_STATEMENT")
             
             st.caption(f"**Load Configuration:** LOAD_MODE={exchange_load_mode}, FILE_FORMAT=PARQUET (USE_VECTORIZED_SCANNER=TRUE), MATCH_BY_COLUMN_NAME=CASE_SENSITIVE, ON_ERROR=ABORT_STATEMENT")
             
@@ -2290,6 +2324,11 @@ with tab1:
                                     print(f"[FirnExchange Import] Local path, using: {relative_file_path}")
                                 
                                 if relative_file_path:
+                                    # Normalize path: remove double slashes that can occur when
+                                    # stage_path ends with / and extracted path starts with /
+                                    # This is critical for ADD_FILES_COPY which doesn't tolerate //
+                                    while '//' in relative_file_path:
+                                        relative_file_path = relative_file_path.replace('//', '/')
                                     selected_files.append(relative_file_path)
                                     print(f"[FirnExchange Import] Final file path for COPY: {relative_file_path}")
                                 else:

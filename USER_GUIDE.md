@@ -193,17 +193,21 @@ CALL FIRN_IMPORT_ASYNC_PROC(
 | TARGET_TABLE | VARCHAR | Target Iceberg table name | `'LINEITEM_ICEBERG'` |
 | STAGE | VARCHAR | External stage (fully qualified) | `'DB.SCH.MY_STAGE'` |
 | WAREHOUSE | VARCHAR | Warehouse name | `'XSMALL'` |
-| LOAD_MODE | VARCHAR | `'COPY'` or `'ADD_FILES_COPY'` | `'ADD_FILES_COPY'` |
+| LOAD_MODE | VARCHAR | `'FULL_INGEST'`, `'ADD_FILES_COPY'`, or `'ADD_FILES_REFERENCE'` | `'ADD_FILES_COPY'` |
 | MAX_WORKERS | NUMBER | Parallel threads (1-10) | `4` |
 
 ### Load Modes
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| `COPY` | Traditional COPY INTO | Standard data loading |
-| `ADD_FILES_COPY` | Iceberg-optimized loading | Best for Iceberg tables, registers files without rewriting |
+| `FULL_INGEST` | Traditional COPY INTO with full data parsing | Standard data loading, data transformation needed |
+| `ADD_FILES_COPY` | Copy parquet files to table base location, then register | Best for Iceberg tables when files are on external stage |
+| `ADD_FILES_REFERENCE` | Register existing parquet files without copying (Private Preview) | Files already in Iceberg table's base location |
 
-**Note:** `ADD_FILES_COPY` requires `USE_VECTORIZED_SCANNER = TRUE` (automatically enabled).
+**Notes:**
+- `ADD_FILES_COPY` and `ADD_FILES_REFERENCE` require `USE_VECTORIZED_SCANNER = TRUE` (automatically enabled)
+- `ADD_FILES_REFERENCE` requires files to already exist under the Iceberg table's `BASE_LOCATION`
+- For `ADD_FILES_REFERENCE`, export files directly to the table's base location subfolder
 
 ### Import Log Table Schema
 
@@ -448,7 +452,7 @@ CALL FT_DB.FT_SCH.FIRN_IMPORT_ASYNC_PROC(
     'FT_TGT_TABLE_LINEITEM_AFC',                         -- TARGET_TABLE
     'FT_DB.FT_SCH.FT_EXT_STAGE_AZURE',                   -- STAGE
     'XSMALL',                                             -- WAREHOUSE
-    'ADD_FILES_COPY',                                     -- LOAD_MODE
+    'ADD_FILES_COPY',                                     -- LOAD_MODE (or 'FULL_INGEST')
     4                                                     -- MAX_WORKERS
 );
 
@@ -604,6 +608,7 @@ The original value is preserved in the exported Parquet data; only the stage pat
 |-------|-------|----------|
 | `Unsupported statement type 'USE'` | Old procedure version | Redeploy `firn_procedures.sql` |
 | `LOAD_MODE = ADD_FILES_COPY option is not supported` | Missing vectorized scanner | Ensure using latest procedures with `USE_VECTORIZED_SCANNER = TRUE` |
+| `SQL execution internal error (370001)` | Double slashes in file path with ADD_FILES_COPY | Fixed in v2.1 - paths are now normalized to remove `//` |
 | `syntax error ... unexpected 'AIR'` | Space in partition path | Ensure using latest procedures with path sanitization |
 | `Access denied` | Stage permissions | Grant USAGE on stage to executing role |
 | `Warehouse timeout` | Large partition | Reduce partition size or increase warehouse |
@@ -631,6 +636,35 @@ The original value is preserved in the exported Parquet data; only the stage pat
    ```sql
    SHOW WAREHOUSES LIKE '<your_warehouse>';
    ```
+
+---
+
+## Local Testing Mode
+
+FirnExchange supports local execution for development and testing:
+
+### Running Locally
+
+```bash
+# Set environment variables and run
+FIRN_LOCAL_TEST=true SNOWFLAKE_CONNECTION_NAME=your-connection-name streamlit run FirnExchange.py
+```
+
+### Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `FIRN_LOCAL_TEST` | Set to `true` to enable local testing mode | Yes |
+| `SNOWFLAKE_CONNECTION_NAME` | Connection name from `~/.snowflake/connections.toml` | Yes |
+
+### Local vs Snowflake Deployment
+
+| Feature | Local Testing | Streamlit in Snowflake |
+|---------|---------------|------------------------|
+| Authentication | connections.toml | Native Snowflake auth |
+| Environment indicator | "💻 Local (Testing)" | "🏔️ Streamlit in Snowflake" |
+| All features | ✅ Supported | ✅ Supported |
+| Production use | ❌ Not recommended | ✅ Recommended |
 
 ---
 

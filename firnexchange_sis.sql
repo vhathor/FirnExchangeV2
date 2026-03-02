@@ -5,7 +5,7 @@
   Version: 1.0
   
   Usage:
-    cd /Users/vverma/sprojects/FirnExchange_V2
+    cd /Users/vverma/sprojects/snowflake/apps/FirnExchange_V2
     
     # Step 1: Deploy stored procedures first
     snow sql --connection sf-usb97494-vverma-kp_une --filename firn_procedures.sql
@@ -71,18 +71,18 @@ CREATE STAGE IF NOT EXISTS FT_DB.FT_SCH.FIRNEXCHANGE_STAGE
 -- STEP 5: Upload Application Files to Stage
 --------------------------------------------------------------------------------
 -- Upload main application file
-PUT file:///Users/vverma/sprojects/FirnExchange_V2/FirnExchange.py 
+PUT file:///Users/vverma/sprojects/snowflake/apps/FirnExchange_V2/FirnExchange.py 
     @FT_DB.FT_SCH.FIRNEXCHANGE_STAGE 
     AUTO_COMPRESS = FALSE 
     OVERWRITE = TRUE;
 
 -- Upload Python dependencies files (both formats for compatibility)
-PUT file:///Users/vverma/sprojects/FirnExchange_V2/environment.yml 
+PUT file:///Users/vverma/sprojects/snowflake/apps/FirnExchange_V2/environment.yml 
     @FT_DB.FT_SCH.FIRNEXCHANGE_STAGE 
     AUTO_COMPRESS = FALSE 
     OVERWRITE = TRUE;
 
-PUT file:///Users/vverma/sprojects/FirnExchange_V2/pyproject.toml 
+PUT file:///Users/vverma/sprojects/snowflake/apps/FirnExchange_V2/pyproject.toml 
     @FT_DB.FT_SCH.FIRNEXCHANGE_STAGE 
     AUTO_COMPRESS = FALSE 
     OVERWRITE = TRUE;
