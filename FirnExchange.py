@@ -1313,15 +1313,34 @@ with tab1:
                                     failed_count = 0
                                     for idx in st.session_state.exchange_selected_files:
                                         file_name = original_files_df.loc[idx, 'name']
-                                        # Extract relative path from S3 URL if needed
-                                        if file_name.startswith('s3://') and exchange_stage_path:
-                                            # Extract path after the stage relative path
+                                        # Extract relative path from cloud storage URL if needed
+                                        relative_file_path = None
+                                        
+                                        if '://' in file_name and exchange_stage_path:
+                                            # Cloud storage URL (s3://, azure://, gs://, etc.)
                                             search_pattern = f'/{exchange_stage_path}/'
                                             if search_pattern in file_name:
                                                 split_pos = file_name.index(search_pattern) + len(search_pattern)
                                                 relative_file_path = file_name[split_pos:]
                                             else:
-                                                relative_file_path = file_name.split('/')[-1]
+                                                # Pattern not found, use the last segment of stage_path to find position
+                                                parts = file_name.split('/')
+                                                stage_path_segments = exchange_stage_path.rstrip('/').split('/')
+                                                last_stage_segment = stage_path_segments[-1]
+                                                
+                                                stage_idx = -1
+                                                for i, part in enumerate(parts):
+                                                    if part == last_stage_segment:
+                                                        stage_idx = i
+                                                
+                                                if stage_idx >= 0:
+                                                    remaining_parts = parts[stage_idx + 1:]
+                                                    if remaining_parts:
+                                                        relative_file_path = '/'.join(remaining_parts)
+                                                    else:
+                                                        relative_file_path = parts[-1]
+                                                else:
+                                                    relative_file_path = parts[-1]
                                         else:
                                             relative_file_path = file_name.split('/')[-1]
                                         
@@ -2292,25 +2311,40 @@ with tab1:
                                             relative_file_path = f"{exchange_stage_path}/{path_after_stage}"
                                             print(f"[FirnExchange Import] Extracted relative path: {relative_file_path}")
                                         else:
-                                            # Pattern not found, extract everything after the last occurrence of stage_path
+                                            # Pattern not found, extract path using the last segment of stage_path
                                             print(f"[FirnExchange Import] Pattern not found, trying alternative extraction")
-                                            # Split by '/' and find all parts after stage_path
+                                            # Split by '/' and find the last segment of stage_path in parts
                                             parts = file_name.split('/')
+                                            stage_path_segments = exchange_stage_path.rstrip('/').split('/')
+                                            last_stage_segment = stage_path_segments[-1]
+                                            print(f"[FirnExchange Import] Looking for last segment '{last_stage_segment}' in URL parts")
+                                            
                                             try:
-                                                stage_idx = parts.index(exchange_stage_path)
-                                                # Get all parts after stage_path
-                                                remaining_parts = parts[stage_idx + 1:]
-                                                if remaining_parts:
-                                                    path_after_stage = '/'.join(remaining_parts)
-                                                    relative_file_path = f"{exchange_stage_path}/{path_after_stage}"
+                                                # Find the index of the last segment of stage_path
+                                                # Use rfind logic to find the last occurrence
+                                                stage_idx = -1
+                                                for i, part in enumerate(parts):
+                                                    if part == last_stage_segment:
+                                                        stage_idx = i
+                                                
+                                                if stage_idx >= 0:
+                                                    # Get all parts after the last stage segment
+                                                    remaining_parts = parts[stage_idx + 1:]
+                                                    if remaining_parts:
+                                                        path_after_stage = '/'.join(remaining_parts)
+                                                        relative_file_path = f"{exchange_stage_path}/{path_after_stage}"
+                                                    else:
+                                                        # No remaining parts, just use the stage path
+                                                        relative_file_path = exchange_stage_path
+                                                    print(f"[FirnExchange Import] Alternative extraction result: {relative_file_path}")
                                                 else:
-                                                    # Just use the filename
+                                                    # Last segment not found, just use filename
                                                     relative_file_path = f"{exchange_stage_path}/{parts[-1]}"
-                                                print(f"[FirnExchange Import] Alternative extraction result: {relative_file_path}")
-                                            except ValueError:
-                                                # stage_path not found in parts, just use filename
+                                                    print(f"[FirnExchange Import] Last stage segment not found in URL parts, using: {relative_file_path}")
+                                            except Exception as e:
+                                                # Fallback: just use filename
                                                 relative_file_path = f"{exchange_stage_path}/{parts[-1]}"
-                                                print(f"[FirnExchange Import] Stage path not found in URL parts, using: {relative_file_path}")
+                                                print(f"[FirnExchange Import] Error in alternative extraction: {e}, using: {relative_file_path}")
                                     else:
                                         # No stage path specified, just get the filename
                                         relative_file_path = file_name.split('/')[-1]
