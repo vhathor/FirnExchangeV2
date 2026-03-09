@@ -4,7 +4,7 @@
   Purpose: Python stored procedures that execute data migration operations
            using async queries (collect_nowait) for parallel processing
   
-  Version: 2.2 (Task-Based Architecture with DATE type fix)
+  Version: 2.3 (ADD_FILES_COPY → FULL_INGEST fallback for import)
   
   Components:
     1. FIRN_TASK_REGISTRY table - Master table for tracking tasks
@@ -13,6 +13,10 @@
   
   Usage:
     Run this script BEFORE deploying the FirnExchange Streamlit application
+    
+  Fixes in v2.3:
+    - Import: ADD_FILES_COPY auto-fallback to FULL_INGEST on failure
+    - Import log table: added LOAD_MODE_USED column to track actual mode used
     
   Fixes in v2.2:
     - Fixed DATE/TIMESTAMP partition values (now properly quoted in WHERE clause)
@@ -171,6 +175,8 @@ SELECT 'Export procedure created' AS STATUS;
 
 --------------------------------------------------------------------------------
 -- STEP 3: Create Import Async Procedure
+-- v2.3: When load_mode is ADD_FILES_COPY and a file fails, automatically
+--        retries with FULL_INGEST before marking as FAILED.
 --------------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE FIRN_IMPORT_ASYNC_PROC(
     TASK_NAME STRING,
@@ -193,14 +199,30 @@ $$
 import time
 from datetime import datetime
 
+def build_copy_sql(fully_qualified_table, stage, file_path, mode):
+    """Build COPY INTO SQL for the given load mode"""
+    return (
+        f"COPY INTO {fully_qualified_table} FROM @{stage}/{file_path} "
+        f"FILE_FORMAT = (TYPE = PARQUET USE_VECTORIZED_SCANNER = TRUE) "
+        f"MATCH_BY_COLUMN_NAME = CASE_SENSITIVE ON_ERROR = ABORT_STATEMENT "
+        f"LOAD_MODE = {mode}"
+    )
+
 def import_handler(session, task_name, import_log_table, target_database, target_schema, target_table,
                    stage, warehouse, load_mode, max_workers):
-    """Import all PENDING files using async queries with concurrency control"""
+    """Import all PENDING files using async queries with concurrency control.
+    
+    When load_mode is ADD_FILES_COPY: if a file fails, automatically retries 
+    with FULL_INGEST. Only marks as FAILED if both modes fail.
+    """
     try:
-        # Update task registry - RUNNING
         session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'RUNNING', START_TIME = CURRENT_TIMESTAMP() WHERE TASK_NAME = '{task_name}'").collect()
         
-        # Get all PENDING files
+        try:
+            session.sql(f"ALTER TABLE {import_log_table} ADD COLUMN IF NOT EXISTS LOAD_MODE_USED STRING").collect()
+        except Exception:
+            pass
+        
         pending_files = session.sql(f"SELECT FILE_PATH FROM {import_log_table} WHERE FILE_STATUS = 'PENDING'").collect()
         
         if not pending_files:
@@ -211,46 +233,57 @@ def import_handler(session, task_name, import_log_table, target_database, target
         active_jobs = {}
         completed_count = 0
         failed_count = 0
+        fallback_count = 0
         file_index = 0
         fully_qualified_table = f'"{target_database}"."{target_schema}"."{target_table}"'
+        fallback_enabled = load_mode.upper() == 'ADD_FILES_COPY'
+        fallback_queue = []
         
         while file_index < total_files or active_jobs:
-            # Poll existing jobs
-            for file_path, (job, start_time) in list(active_jobs.items()):
+            for file_path, (job, start_time, current_mode) in list(active_jobs.items()):
                 if job.is_done():
+                    safe_file_path = file_path.replace("'", "''")
                     try:
                         import_result = job.result()
                         rows_loaded = import_result[0].as_dict().get('rows_loaded', 0) if import_result else 0
-                        safe_file_path = file_path.replace("'", "''")
-                        session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'SUCCESS', IMPORT_END_AT = CURRENT_TIMESTAMP(), ROWS_LOADED = {rows_loaded} WHERE FILE_PATH = '{safe_file_path}'").collect()
+                        session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'SUCCESS', IMPORT_END_AT = CURRENT_TIMESTAMP(), ROWS_LOADED = {rows_loaded}, LOAD_MODE_USED = '{current_mode}' WHERE FILE_PATH = '{safe_file_path}'").collect()
                         completed_count += 1
                     except Exception as e:
-                        error_msg = str(e).replace("'", "''")[:500]
-                        safe_file_path = file_path.replace("'", "''")
-                        session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}' WHERE FILE_PATH = '{safe_file_path}'").collect()
-                        failed_count += 1
+                        if fallback_enabled and current_mode == 'ADD_FILES_COPY':
+                            fallback_error = str(e).replace("'", "''")[:500]
+                            session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'RETRYING_FULL_INGEST', ERROR_MESSAGE = 'ADD_FILES_COPY failed: {fallback_error}. Retrying with FULL_INGEST...' WHERE FILE_PATH = '{safe_file_path}'").collect()
+                            fallback_queue.append(file_path)
+                        else:
+                            error_msg = str(e).replace("'", "''")[:500]
+                            mode_note = f' (after ADD_FILES_COPY fallback)' if current_mode == 'FULL_INGEST' and fallback_enabled else ''
+                            session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}{mode_note}', LOAD_MODE_USED = '{current_mode}' WHERE FILE_PATH = '{safe_file_path}'").collect()
+                            failed_count += 1
                     del active_jobs[file_path]
             
-            # Submit new jobs
             while len(active_jobs) < max_workers and file_index < total_files:
                 file_path = pending_files[file_index]['FILE_PATH']
                 safe_file_path = file_path.replace("'", "''")
-                
-                # Update to IN_PROGRESS
                 session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'IN_PROGRESS' WHERE FILE_PATH = '{safe_file_path}'").collect()
-                
-                # Submit async COPY INTO with USE_VECTORIZED_SCANNER (required for ADD_FILES_COPY)
-                copy_sql = f"COPY INTO {fully_qualified_table} FROM @{stage}/{file_path} FILE_FORMAT = (TYPE = PARQUET USE_VECTORIZED_SCANNER = TRUE) MATCH_BY_COLUMN_NAME = CASE_SENSITIVE ON_ERROR = ABORT_STATEMENT LOAD_MODE = {load_mode}"
+                copy_sql = build_copy_sql(fully_qualified_table, stage, file_path, load_mode)
                 async_job = session.sql(copy_sql).collect_nowait()
-                active_jobs[file_path] = (async_job, datetime.now())
+                active_jobs[file_path] = (async_job, datetime.now(), load_mode.upper())
                 file_index += 1
+            
+            while len(active_jobs) < max_workers and fallback_queue:
+                file_path = fallback_queue.pop(0)
+                safe_file_path = file_path.replace("'", "''")
+                session.sql(f"UPDATE {import_log_table} SET FILE_STATUS = 'IN_PROGRESS' WHERE FILE_PATH = '{safe_file_path}'").collect()
+                copy_sql = build_copy_sql(fully_qualified_table, stage, file_path, 'FULL_INGEST')
+                async_job = session.sql(copy_sql).collect_nowait()
+                active_jobs[file_path] = (async_job, datetime.now(), 'FULL_INGEST')
+                fallback_count += 1
             
             if active_jobs:
                 time.sleep(2)
         
-        # Update task registry - COMPLETED
+        fallback_msg = f", {fallback_count} used FULL_INGEST fallback" if fallback_count > 0 else ""
         session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = {completed_count}, FAILED_ITEMS = {failed_count} WHERE TASK_NAME = '{task_name}'").collect()
-        return f"Import completed: {completed_count} succeeded, {failed_count} failed out of {total_files}"
+        return f"Import completed: {completed_count} succeeded, {failed_count} failed out of {total_files}{fallback_msg}"
         
     except Exception as e:
         error_msg = str(e).replace("'", "''")[:500]
