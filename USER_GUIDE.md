@@ -2,6 +2,9 @@
 
 *A Simple Guide to High-Performance Data Migration Between Snowflake Tables*
 
+**Version**: 2.3  
+**Last Updated**: March 2026
+
 ---
 
 ## What is FirnExchange?
@@ -10,7 +13,7 @@ FirnExchange is a Streamlit application that enables high-performance migration 
 
 ## Architecture Overview
 
-FirnExchange v2.0 uses a **task-based architecture**:
+FirnExchange v2.3 uses a **task-based architecture**:
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
@@ -27,7 +30,7 @@ FirnExchange v2.0 uses a **task-based architecture**:
 **Key Components:**
 - **FIRN_TASK_REGISTRY**: Central table tracking all export/import operations
 - **FIRN_EXPORT_ASYNC_PROC**: Stored procedure for parallel partition export
-- **FIRN_IMPORT_ASYNC_PROC**: Stored procedure for parallel file import
+- **FIRN_IMPORT_ASYNC_PROC**: Stored procedure for parallel file import (with ADD_FILES_COPY -> FULL_INGEST automatic fallback)
 - **Tracking Tables**: Per-operation tables tracking individual partitions/files
 
 ## Prerequisites
@@ -98,7 +101,7 @@ CALL FIRN_EXPORT_ASYNC_PROC(
     STAGE_PATH,          -- Path within stage for output files
     PARQUET_COLUMNS,     -- Comma-separated column list for output
     WAREHOUSE,           -- Warehouse for query execution
-    MAX_WORKERS,         -- Number of parallel export threads (1-10)
+    MAX_WORKERS,         -- Number of parallel export threads
     OVERWRITE,           -- TRUE to overwrite existing files
     SINGLE_FILE,         -- TRUE for one file per partition
     MAX_FILE_SIZE        -- Maximum file size in bytes (default 5GB)
@@ -119,7 +122,7 @@ CALL FIRN_EXPORT_ASYNC_PROC(
 | STAGE_PATH | VARCHAR | Output path in stage | `'exports/2026/'` |
 | PARQUET_COLUMNS | VARCHAR | Columns to export | `'"COL1", "COL2", "COL3"'` |
 | WAREHOUSE | VARCHAR | Warehouse name | `'XSMALL'` |
-| MAX_WORKERS | NUMBER | Parallel threads (1-10) | `4` |
+| MAX_WORKERS | NUMBER | Parallel threads (auto-calculated: `max_cluster_count x MAX_CONCURRENCY_LEVEL`) | `80` |
 | OVERWRITE | BOOLEAN | Overwrite existing files | `TRUE` |
 | SINGLE_FILE | BOOLEAN | One file per partition | `TRUE` |
 | MAX_FILE_SIZE | NUMBER | Max file size (bytes) | `5368709120` (5GB) |
@@ -177,8 +180,8 @@ CALL FIRN_IMPORT_ASYNC_PROC(
     TARGET_TABLE,        -- Name of target Iceberg table
     STAGE,               -- Fully qualified stage name
     WAREHOUSE,           -- Warehouse for query execution
-    LOAD_MODE,           -- COPY or ADD_FILES_COPY
-    MAX_WORKERS          -- Number of parallel import threads (1-10)
+    LOAD_MODE,           -- FULL_INGEST, ADD_FILES_COPY, or ADD_FILES_REFERENCE
+    MAX_WORKERS          -- Number of parallel import threads
 );
 ```
 
@@ -194,7 +197,17 @@ CALL FIRN_IMPORT_ASYNC_PROC(
 | STAGE | VARCHAR | External stage (fully qualified) | `'DB.SCH.MY_STAGE'` |
 | WAREHOUSE | VARCHAR | Warehouse name | `'XSMALL'` |
 | LOAD_MODE | VARCHAR | `'FULL_INGEST'`, `'ADD_FILES_COPY'`, or `'ADD_FILES_REFERENCE'` | `'ADD_FILES_COPY'` |
-| MAX_WORKERS | NUMBER | Parallel threads (1-10) | `4` |
+| MAX_WORKERS | NUMBER | Parallel threads (auto-calculated: `max_cluster_count x MAX_CONCURRENCY_LEVEL`) | `80` |
+
+### Concurrency Calculation
+
+Max Workers is dynamically calculated from the selected warehouse:
+
+```
+max_workers = max_cluster_count x MAX_CONCURRENCY_LEVEL
+```
+
+For example, an XSMALL warehouse with `MAX_CONCURRENCY_LEVEL=8` and `max_cluster_count=10` yields up to **80** parallel threads. The Streamlit UI auto-detects these values and sets the slider range accordingly.
 
 ### Load Modes
 
@@ -209,17 +222,40 @@ CALL FIRN_IMPORT_ASYNC_PROC(
 - `ADD_FILES_REFERENCE` requires files to already exist under the Iceberg table's `BASE_LOCATION`
 - For `ADD_FILES_REFERENCE`, export files directly to the table's base location subfolder
 
+### ADD_FILES_COPY -> FULL_INGEST Automatic Fallback (v2.3)
+
+When `ADD_FILES_COPY` is selected, the import procedure automatically handles failures by retrying with `FULL_INGEST`:
+
+```
+ADD_FILES_COPY attempt -> fails -> RETRYING_FULL_INGEST -> FULL_INGEST attempt -> SUCCESS or FAILED
+```
+
+- If `ADD_FILES_COPY` fails for a file (e.g., timestamp precision mismatch), the file status is set to `RETRYING_FULL_INGEST` and queued for `FULL_INGEST` retry
+- The `LOAD_MODE_USED` column in the import log records which mode ultimately succeeded
+- The `ERROR_MESSAGE` column preserves the original ADD_FILES_COPY failure reason even on successful fallback
+- Only marks a file as `FAILED` if **both** modes fail
+- Fallback is only triggered when the original load mode is `ADD_FILES_COPY`
+
+### Known Limitations: Parquet Export and Iceberg Compatibility
+
+| Limitation | Description | Workaround |
+|------------|-------------|------------|
+| **TIMESTAMP_LTZ / TIMESTAMP_TZ** | Cannot be exported to Parquet format. Snowflake returns: `TIMESTAMP_TZ and LTZ types are not supported for unloading to Parquet` | Cast to `TIMESTAMP_NTZ` in the export SELECT (FirnExchange handles this automatically) |
+| **Timestamp Precision (MILLIS vs MICROS)** | Snowflake Parquet writer exports timestamps with MILLIS precision (scale 3), but the Iceberg spec and ADD_FILES_COPY expect MICROS precision (scale 6). Error: `Parquet file time column has an unsupported time unit. Parquet Unit: 'MILLIS' (scale: '3'), Expected Scale: '6'` | Use `FULL_INGEST` (which re-parses data), or rely on the automatic ADD_FILES_COPY -> FULL_INGEST fallback (v2.3) |
+| **INTEGER vs NUMBER(38,0)** | Snowflake exports INTEGER columns as NUMBER(38,0) in Parquet. Iceberg table schema must use NUMBER(38,0) to match. | Ensure Iceberg table columns use `NUMBER(38,0)` instead of `INTEGER` |
+
 ### Import Log Table Schema
 
 ```sql
 CREATE TABLE <table_name>_IMPORT_FELOG (
     FILE_PATH STRING PRIMARY KEY,      -- Stage path to file
-    FILE_STATUS STRING,                 -- PENDING/IN_PROGRESS/SUCCESS/FAILED
+    FILE_STATUS STRING,                 -- PENDING/IN_PROGRESS/RETRYING_FULL_INGEST/SUCCESS/FAILED
     IMPORT_START_AT TIMESTAMP,          -- Import start time
     IMPORT_END_AT TIMESTAMP,            -- Import end time
-    ERROR_MESSAGE STRING,               -- Error details if failed
+    ERROR_MESSAGE STRING,               -- Error details if failed (preserved even on fallback success)
     ROWS_LOADED BIGINT,                 -- Rows loaded from file
-    ROWS_PARSED BIGINT                  -- Rows parsed from file
+    ROWS_PARSED BIGINT,                 -- Rows parsed from file
+    LOAD_MODE_USED STRING              -- Actual load mode used (added automatically by procedure)
 );
 ```
 
@@ -501,8 +537,8 @@ REMOVE @FT_DB.FT_SCH.FT_EXT_STAGE_AZURE/validation_test/;
 ### Performance Tips
 
 1. **Choose the Right Partition Key**: Use a column with good data distribution (e.g., date columns)
-2. **Tune Thread Count**: Start with 4 threads, increase based on warehouse size and performance
-3. **Monitor Warehouse Load**: Ensure your warehouse can handle the thread count
+2. **Tune Thread Count**: Max workers auto-calculated as `max_cluster_count x MAX_CONCURRENCY_LEVEL`. Adjust via slider based on observed performance.
+3. **Monitor Warehouse Load**: Ensure your warehouse can handle the concurrency level
 4. **Incremental Migration**: Use "Select Non-Completed" for large tables to migrate in batches
 
 ### Important Notes
@@ -515,7 +551,7 @@ REMOVE @FT_DB.FT_SCH.FT_EXT_STAGE_AZURE/validation_test/;
 
 ### Monitoring Your Migration
 
-FirnExchange v2.0 uses **Snowflake Tasks** for execution, providing robust monitoring:
+FirnExchange v2.3 uses **Snowflake Tasks** for execution, providing robust monitoring:
 
 #### Monitor Tasks Tab (Streamlit UI)
 
@@ -564,7 +600,7 @@ WHERE FILE_STATUS != 'SUCCESS';
 2. Analyze partitions (might show 365+ partitions)
 3. Test with 10 partitions first
 4. Once successful, use "Select Non-Completed" to process remaining partitions
-5. Use 8-10 threads on a Medium or Large warehouse
+5. Set max workers based on warehouse capacity (auto-calculated from cluster count and concurrency level)
 
 ### Scenario 2: Failed Partitions
 
@@ -612,6 +648,8 @@ The original value is preserved in the exported Parquet data; only the stage pat
 | `syntax error ... unexpected 'AIR'` | Space in partition path | Ensure using latest procedures with path sanitization |
 | `Access denied` | Stage permissions | Grant USAGE on stage to executing role |
 | `Warehouse timeout` | Large partition | Reduce partition size or increase warehouse |
+| `Parquet file time column has an unsupported time unit. Parquet Unit: 'MILLIS'...` | Snowflake exports timestamps as MILLIS; Iceberg ADD_FILES_COPY expects MICROS | Automatic fallback to FULL_INGEST (v2.3), or use FULL_INGEST directly |
+| `TIMESTAMP_TZ and LTZ types are not supported for unloading to Parquet` | Snowflake cannot export TIMESTAMP_LTZ/TZ to Parquet | FirnExchange auto-casts to TIMESTAMP_NTZ during export |
 
 ### Debugging Steps
 
