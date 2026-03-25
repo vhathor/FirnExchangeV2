@@ -1,6 +1,6 @@
-# FirnExchange v2.3 - Task-Based Architecture Admin Guide
+# FirnExchange v2.4 - Task-Based Architecture Admin Guide
 
-**Version**: 2.3  
+**Version**: 2.4  
 **Architecture**: Snowflake Task-Based Execution  
 **Last Updated**: March 2026
 
@@ -24,7 +24,7 @@
 
 ### From Threading to Tasks
 
-FirnExchange v2.3 represents a major architectural shift from threading-based to Snowflake task-based execution:
+FirnExchange v2.4 represents a major architectural shift from threading-based to Snowflake task-based execution:
 
 **Previous Architecture (v1.x)**:
 ```
@@ -54,7 +54,7 @@ User clicks button → Streamlit creates Snowflake Task → Task runs independen
    - Called by import tasks
    - Uses `collect_nowait()` for async parallelism
    - Processes files independently
-   - Automatic ADD_FILES_COPY -> FULL_INGEST fallback (v2.3)
+   - Automatic ADD_FILES_COPY -> FULL_INGEST fallback (v2.4)
    - Tracks actual load mode used per file via `LOAD_MODE_USED` column
 
 4. **Task Management Functions** (in FirnExchange.py)
@@ -130,7 +130,7 @@ This ensures:
 5. **COMPLETED** - Task finished successfully
 6. **FAILED** - Task encountered errors
 7. **SUSPENDED** - Task manually paused
-8. **RETRYING_FULL_INGEST** - Import file: ADD_FILES_COPY failed, retrying with FULL_INGEST (v2.3)
+8. **RETRYING_FULL_INGEST** - Import file: ADD_FILES_COPY failed, retrying with FULL_INGEST (v2.4)
 
 ### State Transitions
 
@@ -141,7 +141,7 @@ CREATED -> SCHEDULED -> EXECUTING -> RUNNING -> COMPLETED
            <->
       SUSPENDED
 
-Import file-level states (v2.3):
+Import file-level states (v2.4):
 PENDING -> IN_PROGRESS -> SUCCESS
                        -> RETRYING_FULL_INGEST -> IN_PROGRESS -> SUCCESS
                                                              -> FAILED (both modes failed)
@@ -160,9 +160,11 @@ The stored procedures automatically update:
 
 ## Import Fallback Logic
 
-### ADD_FILES_COPY -> FULL_INGEST Automatic Fallback (v2.3)
+### ADD_FILES_COPY -> FULL_INGEST Automatic Fallback (v2.4)
 
 When the import load mode is `ADD_FILES_COPY`, the procedure automatically handles failures by retrying with `FULL_INGEST`. This is particularly useful for Parquet files with timestamp columns, where Snowflake exports MILLIS precision but the Iceberg spec requires MICROS.
+
+**Note:** ADD_FILES_REFERENCE does **not** have automatic fallback. If ADD_FILES_REFERENCE fails (e.g., type mismatch, MILLIS precision), the file is marked as FAILED immediately. This is by design — ADD_FILES_REFERENCE files are in the table's base location and cannot be re-ingested via FULL_INGEST from that location.
 
 ### How It Works
 
@@ -173,7 +175,7 @@ When the import load mode is `ADD_FILES_COPY`, the procedure automatically handl
 5. If `FULL_INGEST` succeeds: `FILE_STATUS = 'SUCCESS'`, `LOAD_MODE_USED = 'FULL_INGEST'`
 6. If `FULL_INGEST` also fails: `FILE_STATUS = 'FAILED'` with error noting "after ADD_FILES_COPY fallback"
 
-### Import Log Table Columns (v2.3)
+### Import Log Table Columns (v2.4)
 
 The procedure automatically adds a `LOAD_MODE_USED` column to the import log table via `ALTER TABLE ADD COLUMN IF NOT EXISTS`. This column records which load mode ultimately processed each file.
 
@@ -350,7 +352,7 @@ DROP TASK <task_name>;
 
 ### Required Privileges
 
-Users need these privileges to use FirnExchange v2.3:
+Users need these privileges to use FirnExchange v2.4:
 
 #### Object Privileges:
 ```sql
@@ -396,8 +398,11 @@ SHOW GRANTS TO ROLE <user_role>;
 | Limitation | Description | Impact | Workaround |
 |------------|-------------|--------|------------|
 | **TIMESTAMP_LTZ / TIMESTAMP_TZ Parquet Export** | Snowflake cannot export these types to Parquet format | Export fails with error | FirnExchange auto-casts to TIMESTAMP_NTZ during export |
-| **Timestamp MILLIS vs MICROS** | Snowflake Parquet writer exports timestamps with MILLIS precision (scale 3); Iceberg spec and ADD_FILES_COPY expect MICROS (scale 6) | ADD_FILES_COPY fails for files with timestamp columns | Automatic fallback to FULL_INGEST (v2.3) |
-| **INTEGER vs NUMBER(38,0)** | Snowflake exports INTEGER as NUMBER(38,0) in Parquet | Schema mismatch if Iceberg table uses INTEGER | Use NUMBER(38,0) in Iceberg table DDL |
+| **Timestamp MILLIS vs MICROS** | Snowflake Parquet writer exports timestamps with MILLIS precision (scale 3); Iceberg ADD_FILES_COPY and ADD_FILES_REFERENCE expect MICROS (scale 6) | ADD_FILES_COPY and ADD_FILES_REFERENCE fail for files with timestamp columns | Automatic fallback to FULL_INGEST (v2.4) for ADD_FILES_COPY only. ADD_FILES_REFERENCE has no fallback. |
+| **INTEGER/SMALLINT/TINYINT/BIGINT** | Snowflake exports all integer types as NUMBER(38,0) in Parquet. SMALLINT, TINYINT, BIGINT not supported as Iceberg column types. | Schema mismatch with ADD_FILES_REFERENCE | Use NUMBER(38,0) or INT in Iceberg DDL. For ADD_FILES_REFERENCE, must use NUMBER(38,0). |
+| **FLOAT exports as DOUBLE** | Snowflake exports FLOAT as DOUBLE in Parquet | ADD_FILES_REFERENCE fails with type mismatch | Use DOUBLE instead of FLOAT in Iceberg DDL for ADD_FILES_REFERENCE |
+| **VARCHAR(N), TIMESTAMP_NTZ(9/0), COLLATE** | Iceberg does not support VARCHAR(N), TIMESTAMP_NTZ precision > 6, or COLLATE | DDL creation fails | Use STRING, TIMESTAMP_NTZ(6), remove COLLATE clauses |
+| **ADD_FILES_REFERENCE location rules** | Files must be under user-specified BASE_LOCATION (not internal Snowflake path). Reserved `data/` and `metadata/` subdirectories are not allowed. | Import fails with location errors | Place files in custom subdirectories under BASE_LOCATION |
 | **ADD_FILES_REFERENCE** | Currently in Private Preview | May not be available in all accounts | Use ADD_FILES_COPY or FULL_INGEST |
 
 ---
@@ -499,6 +504,6 @@ For issues not covered in this guide:
 
 ---
 
-**Document Version**: 2.3  
+**Document Version**: 2.4  
 **Last Updated**: March 2026  
-**Architecture Version**: FirnExchange v2.3
+**Architecture Version**: FirnExchange v2.4

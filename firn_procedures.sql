@@ -4,7 +4,7 @@
   Purpose: Python stored procedures that execute data migration operations
            using async queries (collect_nowait) for parallel processing
   
-  Version: 2.3 (ADD_FILES_COPY → FULL_INGEST fallback for import)
+  Version: 2.4 (ADD_FILES_COPY → FULL_INGEST fallback for import)
   
   Components:
     1. FIRN_TASK_REGISTRY table - Master table for tracking tasks
@@ -14,7 +14,7 @@
   Usage:
     Run this script BEFORE deploying the FirnExchange Streamlit application
     
-  Fixes in v2.3:
+  Fixes in v2.4:
     - Import: ADD_FILES_COPY auto-fallback to FULL_INGEST on failure
     - Import log table: added LOAD_MODE_USED column to track actual mode used
     
@@ -108,13 +108,13 @@ def export_handler(session, task_name, tracking_table, source_database, source_s
     """Export all PENDING partitions using async queries with concurrency control"""
     try:
         # Update task registry - set to RUNNING
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'RUNNING', START_TIME = CURRENT_TIMESTAMP() WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'RUNNING', START_TIME = CURRENT_TIMESTAMP() WHERE TASK_NAME = '{task_name}'").collect()
         
         # Get all PENDING partitions
         pending = session.sql(f"SELECT * FROM {tracking_table} WHERE PARTITION_MIGRATED_STATUS = 'PENDING' ORDER BY TOTAL_ROWS ASC").collect()
         
         if not pending:
-            session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = 0, FAILED_ITEMS = 0 WHERE TASK_NAME = '{task_name}'").collect()
+            session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = 0, FAILED_ITEMS = 0 WHERE TASK_NAME = '{task_name}'").collect()
             return "No PENDING partitions to export"
         
         total_partitions = len(pending)
@@ -162,12 +162,12 @@ def export_handler(session, task_name, tracking_table, source_database, source_s
                 time.sleep(2)
         
         # Update task registry - COMPLETED
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = {completed_count}, FAILED_ITEMS = {failed_count} WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = {completed_count}, FAILED_ITEMS = {failed_count} WHERE TASK_NAME = '{task_name}'").collect()
         return f"Export completed: {completed_count} succeeded, {failed_count} failed out of {total_partitions}"
         
     except Exception as e:
         error_msg = str(e).replace("'", "''")[:500]
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}' WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}' WHERE TASK_NAME = '{task_name}'").collect()
         return f"Export failed: {error_msg}"
 $$;
 
@@ -175,7 +175,7 @@ SELECT 'Export procedure created' AS STATUS;
 
 --------------------------------------------------------------------------------
 -- STEP 3: Create Import Async Procedure
--- v2.3: When load_mode is ADD_FILES_COPY and a file fails, automatically
+-- v2.4: When load_mode is ADD_FILES_COPY and a file fails, automatically
 --        retries with FULL_INGEST before marking as FAILED.
 --------------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE FIRN_IMPORT_ASYNC_PROC(
@@ -216,7 +216,7 @@ def import_handler(session, task_name, import_log_table, target_database, target
     with FULL_INGEST. Only marks as FAILED if both modes fail.
     """
     try:
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'RUNNING', START_TIME = CURRENT_TIMESTAMP() WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'RUNNING', START_TIME = CURRENT_TIMESTAMP() WHERE TASK_NAME = '{task_name}'").collect()
         
         try:
             session.sql(f"ALTER TABLE {import_log_table} ADD COLUMN IF NOT EXISTS LOAD_MODE_USED STRING").collect()
@@ -226,7 +226,7 @@ def import_handler(session, task_name, import_log_table, target_database, target
         pending_files = session.sql(f"SELECT FILE_PATH FROM {import_log_table} WHERE FILE_STATUS = 'PENDING'").collect()
         
         if not pending_files:
-            session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = 0, FAILED_ITEMS = 0 WHERE TASK_NAME = '{task_name}'").collect()
+            session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = 0, FAILED_ITEMS = 0 WHERE TASK_NAME = '{task_name}'").collect()
             return "No PENDING files to import"
         
         total_files = len(pending_files)
@@ -282,12 +282,12 @@ def import_handler(session, task_name, import_log_table, target_database, target
                 time.sleep(2)
         
         fallback_msg = f", {fallback_count} used FULL_INGEST fallback" if fallback_count > 0 else ""
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = {completed_count}, FAILED_ITEMS = {failed_count} WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'COMPLETED', END_TIME = CURRENT_TIMESTAMP(), COMPLETED_ITEMS = {completed_count}, FAILED_ITEMS = {failed_count} WHERE TASK_NAME = '{task_name}'").collect()
         return f"Import completed: {completed_count} succeeded, {failed_count} failed out of {total_files}{fallback_msg}"
         
     except Exception as e:
         error_msg = str(e).replace("'", "''")[:500]
-        session.sql(f"UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY SET TASK_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}' WHERE TASK_NAME = '{task_name}'").collect()
+        session.sql(f"UPDATE FIRN_TASK_REGISTRY SET TASK_STATUS = 'FAILED', ERROR_MESSAGE = '{error_msg}' WHERE TASK_NAME = '{task_name}'").collect()
         return f"Import failed: {error_msg}"
 $$;
 
@@ -297,7 +297,7 @@ SELECT 'Import procedure created' AS STATUS;
 -- STEP 4: Grant Permissions
 --------------------------------------------------------------------------------
 -- Update with your actual role name
-GRANT SELECT, INSERT, UPDATE ON TABLE FT_DB.FT_SCH.FIRN_TASK_REGISTRY TO ROLE SYSADMIN;
+GRANT SELECT, INSERT, UPDATE ON TABLE FIRN_TASK_REGISTRY TO ROLE SYSADMIN;
 GRANT USAGE ON PROCEDURE FIRN_EXPORT_ASYNC_PROC(STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, INT, BOOLEAN, BOOLEAN, NUMBER) TO ROLE SYSADMIN;
 GRANT USAGE ON PROCEDURE FIRN_IMPORT_ASYNC_PROC(STRING, STRING, STRING, STRING, STRING, STRING, STRING, STRING, INT) TO ROLE SYSADMIN;
 

@@ -1,6 +1,6 @@
 """
 FirnExchange - High-Performance Data Migration Tool for Snowflake
-Version: 2.0
+Version: 2.4
 Copyright (c) 2024-2026 Snowflake Inc.
 
 DISCLAIMER: This software is provided by Snowflake Inc. on an "AS IS" basis without 
@@ -553,7 +553,7 @@ def create_export_task(session, task_name, tracking_table, source_db, source_sch
         }).replace("'", "''")
         
         session.sql(f"""
-            INSERT INTO FT_DB.FT_SCH.FIRN_TASK_REGISTRY (
+            INSERT INTO FIRN_TASK_REGISTRY (
                 TASK_NAME, OPERATION_TYPE, SOURCE_DATABASE, SOURCE_SCHEMA,
                 SOURCE_TABLE, TRACKING_TABLE, STAGE, STAGE_PATH,
                 WAREHOUSE, MAX_WORKERS, TOTAL_ITEMS, TASK_STATUS, PARAMETERS
@@ -620,7 +620,7 @@ def create_import_task(session, task_name, import_log_table, target_db, target_s
         }).replace("'", "''")
         
         session.sql(f"""
-            INSERT INTO FT_DB.FT_SCH.FIRN_TASK_REGISTRY (
+            INSERT INTO FIRN_TASK_REGISTRY (
                 TASK_NAME, OPERATION_TYPE, TARGET_DATABASE, TARGET_SCHEMA,
                 TARGET_TABLE, TRACKING_TABLE, STAGE, WAREHOUSE,
                 MAX_WORKERS, TOTAL_ITEMS, TASK_STATUS, PARAMETERS
@@ -692,7 +692,7 @@ def get_task_registry_info(session, task_name=None):
             where_clause = ""
         
         result = session.sql(f"""
-            SELECT * FROM FT_DB.FT_SCH.FIRN_TASK_REGISTRY
+            SELECT * FROM FIRN_TASK_REGISTRY
             {where_clause}
             ORDER BY CREATED_AT DESC
             LIMIT 100
@@ -707,7 +707,7 @@ def suspend_task(session, task_name):
     try:
         session.sql(f"ALTER TASK {task_name} SUSPEND").collect()
         session.sql(f"""
-            UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY
+            UPDATE FIRN_TASK_REGISTRY
             SET TASK_STATUS = 'SUSPENDED'
             WHERE TASK_NAME = '{task_name}'
         """).collect()
@@ -720,7 +720,7 @@ def resume_task(session, task_name):
     try:
         session.sql(f"ALTER TASK {task_name} RESUME").collect()
         session.sql(f"""
-            UPDATE FT_DB.FT_SCH.FIRN_TASK_REGISTRY
+            UPDATE FIRN_TASK_REGISTRY
             SET TASK_STATUS = 'RUNNING'
             WHERE TASK_NAME = '{task_name}'
         """).collect()
@@ -733,7 +733,7 @@ def drop_task(session, task_name):
     try:
         session.sql(f"DROP TASK IF EXISTS {task_name}").collect()
         session.sql(f"""
-            DELETE FROM FT_DB.FT_SCH.FIRN_TASK_REGISTRY
+            DELETE FROM FIRN_TASK_REGISTRY
             WHERE TASK_NAME = '{task_name}'
         """).collect()
         return True, None

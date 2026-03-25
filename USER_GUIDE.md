@@ -2,7 +2,7 @@
 
 *A Simple Guide to High-Performance Data Migration Between Snowflake Tables*
 
-**Version**: 2.3  
+**Version**: 2.4  
 **Last Updated**: March 2026
 
 ---
@@ -13,7 +13,7 @@ FirnExchange is a Streamlit application that enables high-performance migration 
 
 ## Architecture Overview
 
-FirnExchange v2.3 uses a **task-based architecture**:
+FirnExchange v2.4 uses a **task-based architecture**:
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
@@ -219,10 +219,14 @@ For example, an XSMALL warehouse with `MAX_CONCURRENCY_LEVEL=8` and `max_cluster
 
 **Notes:**
 - `ADD_FILES_COPY` and `ADD_FILES_REFERENCE` require `USE_VECTORIZED_SCANNER = TRUE` (automatically enabled)
-- `ADD_FILES_REFERENCE` requires files to already exist under the Iceberg table's `BASE_LOCATION`
+- `ADD_FILES_REFERENCE` requires files to already exist under the Iceberg table's user-specified `BASE_LOCATION` path (not the internal Snowflake-managed path)
+- `ADD_FILES_REFERENCE` does **not** allow files in reserved `data/` or `metadata/` subdirectories under the base location
+- `ADD_FILES_REFERENCE` requires **exact** Parquet physical type matching (e.g., Snowflake exports FLOAT as DOUBLE, INT as NUMBER(38,0)) — the Iceberg table schema must use the exact Parquet types
+- `ADD_FILES_REFERENCE` has no automatic fallback — if it fails, the file is marked FAILED (unlike ADD_FILES_COPY which falls back to FULL_INGEST)
+- `ADD_FILES_COPY` may report `ROWS_LOADED = 0` on success (this is expected — it registers files without counting rows)
 - For `ADD_FILES_REFERENCE`, export files directly to the table's base location subfolder
 
-### ADD_FILES_COPY -> FULL_INGEST Automatic Fallback (v2.3)
+### ADD_FILES_COPY -> FULL_INGEST Automatic Fallback (v2.4)
 
 When `ADD_FILES_COPY` is selected, the import procedure automatically handles failures by retrying with `FULL_INGEST`:
 
@@ -241,8 +245,12 @@ ADD_FILES_COPY attempt -> fails -> RETRYING_FULL_INGEST -> FULL_INGEST attempt -
 | Limitation | Description | Workaround |
 |------------|-------------|------------|
 | **TIMESTAMP_LTZ / TIMESTAMP_TZ** | Cannot be exported to Parquet format. Snowflake returns: `TIMESTAMP_TZ and LTZ types are not supported for unloading to Parquet` | Cast to `TIMESTAMP_NTZ` in the export SELECT (FirnExchange handles this automatically) |
-| **Timestamp Precision (MILLIS vs MICROS)** | Snowflake Parquet writer exports timestamps with MILLIS precision (scale 3), but the Iceberg spec and ADD_FILES_COPY expect MICROS precision (scale 6). Error: `Parquet file time column has an unsupported time unit. Parquet Unit: 'MILLIS' (scale: '3'), Expected Scale: '6'` | Use `FULL_INGEST` (which re-parses data), or rely on the automatic ADD_FILES_COPY -> FULL_INGEST fallback (v2.3) |
-| **INTEGER vs NUMBER(38,0)** | Snowflake exports INTEGER columns as NUMBER(38,0) in Parquet. Iceberg table schema must use NUMBER(38,0) to match. | Ensure Iceberg table columns use `NUMBER(38,0)` instead of `INTEGER` |
+| **Timestamp Precision (MILLIS vs MICROS)** | Snowflake Parquet writer exports timestamps with MILLIS precision (scale 3), but Iceberg ADD_FILES_COPY and ADD_FILES_REFERENCE expect MICROS precision (scale 6). Error: `Parquet file time column has an unsupported time unit` | Use `FULL_INGEST` (re-parses data), or rely on ADD_FILES_COPY -> FULL_INGEST fallback (v2.4). ADD_FILES_REFERENCE has no fallback. |
+| **INTEGER/SMALLINT/TINYINT/BIGINT** | Snowflake exports all integer types as NUMBER(38,0) in Parquet. SMALLINT, TINYINT, and BIGINT are not supported as Iceberg column types. | Use `NUMBER(38,0)` or `INT` in Iceberg DDL. For ADD_FILES_REFERENCE, must use `NUMBER(38,0)` to match Parquet exactly. |
+| **FLOAT exports as DOUBLE** | Snowflake exports FLOAT columns as DOUBLE in Parquet. ADD_FILES_REFERENCE requires exact physical type match. | Use `DOUBLE` instead of `FLOAT` in Iceberg DDL when using ADD_FILES_REFERENCE |
+| **VARCHAR(N) not supported** | Iceberg tables only support max-length VARCHAR (134,217,728) or STRING | Use `STRING` instead of `VARCHAR(N)` in Iceberg DDL |
+| **TIMESTAMP_NTZ precision** | Iceberg max timestamp precision is microseconds (scale 6). TIMESTAMP_NTZ(9) and TIMESTAMP_NTZ(0) are not valid. | Use `TIMESTAMP_NTZ(6)` in Iceberg DDL |
+| **COLLATE not supported** | Iceberg tables do not support collation specifications | Remove all COLLATE clauses when converting FDN DDL to Iceberg |
 
 ### Import Log Table Schema
 
@@ -551,7 +559,7 @@ REMOVE @FT_DB.FT_SCH.FT_EXT_STAGE_AZURE/validation_test/;
 
 ### Monitoring Your Migration
 
-FirnExchange v2.3 uses **Snowflake Tasks** for execution, providing robust monitoring:
+FirnExchange v2.4 uses **Snowflake Tasks** for execution, providing robust monitoring:
 
 #### Monitor Tasks Tab (Streamlit UI)
 
@@ -648,8 +656,11 @@ The original value is preserved in the exported Parquet data; only the stage pat
 | `syntax error ... unexpected 'AIR'` | Space in partition path | Ensure using latest procedures with path sanitization |
 | `Access denied` | Stage permissions | Grant USAGE on stage to executing role |
 | `Warehouse timeout` | Large partition | Reduce partition size or increase warehouse |
-| `Parquet file time column has an unsupported time unit. Parquet Unit: 'MILLIS'...` | Snowflake exports timestamps as MILLIS; Iceberg ADD_FILES_COPY expects MICROS | Automatic fallback to FULL_INGEST (v2.3), or use FULL_INGEST directly |
+| `Parquet file time column has an unsupported time unit. Parquet Unit: 'MILLIS'...` | Snowflake exports timestamps as MILLIS; Iceberg ADD_FILES_COPY/REFERENCE expects MICROS | Automatic fallback to FULL_INGEST (v2.4) for ADD_FILES_COPY; use FULL_INGEST directly for ADD_FILES_REFERENCE |
 | `TIMESTAMP_TZ and LTZ types are not supported for unloading to Parquet` | Snowflake cannot export TIMESTAMP_LTZ/TZ to Parquet | FirnExchange auto-casts to TIMESTAMP_NTZ during export |
+| `Parquet file schema data type is incompatible with table column` | ADD_FILES_REFERENCE requires exact Parquet physical type match (FLOAT vs DOUBLE, INT vs DECIMAL) | Match Iceberg types to Parquet: use DOUBLE not FLOAT, NUMBER(38,0) not INT |
+| `Invalid source location for ADD_FILES_REFERENCE ... data and metadata folders are restricted` | Files in reserved `data/` or `metadata/` subdirectories | Place files in custom subdirectories (e.g., `part_a/`, `export_001/`) |
+| `copy allowed only under locations: ...` | ADD_FILES_REFERENCE files not under user-specified BASE_LOCATION | Ensure files are under the BASE_LOCATION from CREATE ICEBERG TABLE, not the internal Snowflake path |
 
 ### Debugging Steps
 
